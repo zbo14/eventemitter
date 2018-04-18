@@ -7,6 +7,15 @@ type listener func(*EventEmitter, ...interface{})
 type listeners struct {
 	on   []listener
 	once []listener
+	ch   chan struct{}
+	done chan struct{}
+}
+
+func newListeners() *listeners {
+	return &listeners{
+		ch:   make(chan struct{}),
+		done: make(chan struct{}),
+	}
 }
 
 type message struct {
@@ -67,30 +76,38 @@ func (e *EventEmitter) listen() {
 
 func (e *EventEmitter) on(ev string, l listener) {
 	if e.ls[ev] == nil {
-		e.ls[ev] = new(listeners)
+		e.ls[ev] = newListeners()
 	}
 	e.ls[ev].on = append(e.ls[ev].on, l)
 }
 
 func (e *EventEmitter) once(ev string, l listener) {
 	if e.ls[ev] == nil {
-		e.ls[ev] = new(listeners)
+		e.ls[ev] = newListeners()
 	}
 	e.ls[ev].once = append(e.ls[ev].once, l)
 }
 
 func (e *EventEmitter) fire(ev string, params ...interface{}) {
 	ls := e.ls[ev]
-	if len(ls.on) > 0 {
-		for _, l := range ls.on {
-			go l(e, params...)
-		}
-	}
-	if len(ls.once) > 0 {
-		for _, l := range ls.once {
-			go l(e, params...)
+	go func() {
+		for i := 0; i < len(ls.on)+len(ls.once); i++ {
+			<-ls.ch
 		}
 		ls.once = ls.once[:0]
+		ls.done <- struct{}{}
+	}()
+	for _, l := range ls.on {
+		go func(l listener) {
+			l(e, params...)
+			ls.ch <- struct{}{}
+		}(l)
+	}
+	for _, l := range ls.once {
+		go func(l listener) {
+			l(e, params...)
+			ls.ch <- struct{}{}
+		}(l)
 	}
 }
 
@@ -142,5 +159,14 @@ func (e *EventEmitter) Emit(ev string, params ...interface{}) {
 		cmd:    "emit",
 		event:  ev,
 		params: params,
+	}
+}
+
+// Wait waits for the event to be emitted a certain number of times
+func (e *EventEmitter) Wait(ev string) {
+	if e.ls[ev] == nil {
+		e.fire("error", fmt.Errorf("unexpected event: %s", ev))
+	} else {
+		<-e.ls[ev].done
 	}
 }
